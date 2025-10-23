@@ -1,0 +1,21 @@
+# 1. Add useful ignore rules
+cat > .gitignore <<'EOF'
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.env
+*.sqlite3
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+build/
+
+# IDE & System
+.vscode/
+.idea/
+.DS_Store
+EOF
