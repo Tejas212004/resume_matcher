@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useResume } from "../context/ResumeContext"; // ✅ import global context
 
 export default function Home() {
   const [resume, setResume] = useState(null);
@@ -7,6 +8,8 @@ export default function Home() {
   const [jdText, setJdText] = useState("");
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+
+  const { setResumeData } = useResume(); // ✅ get context setter
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -31,9 +34,22 @@ export default function Home() {
         method: "POST",
         body: formData,
       });
+
+      if (!res.ok) {
+        throw new Error("Failed to get results from backend");
+      }
+
       const data = await res.json();
 
-      navigate("/results", { state: data });
+      // ✅ Store resume, JD, and result globally
+      setResumeData({
+        resume: resume,
+        jd: jdFile || jdText,
+        result: data,
+      });
+
+      // ✅ Navigate correctly with state
+      navigate("/result", { state: { result: data } });
     } catch (err) {
       console.error(err);
       alert("Error connecting to backend");
@@ -43,12 +59,13 @@ export default function Home() {
   };
 
   return (
-    <div className="bg-white p-8 rounded-2xl shadow-md">
+    <div className="bg-white p-8 rounded-2xl shadow-md max-w-xl mx-auto mt-10">
       <h1 className="text-2xl font-semibold text-gray-800 mb-4 text-center">
         Skill-Based Resume Matcher
       </h1>
 
       <form onSubmit={handleSubmit} className="space-y-4">
+        {/* Resume Upload */}
         <div>
           <label className="block mb-1 font-medium">Upload Resume</label>
           <input
@@ -59,8 +76,11 @@ export default function Home() {
           />
         </div>
 
+        {/* JD Upload or Text */}
         <div>
-          <label className="block mb-1 font-medium">Job Description (File or Text)</label>
+          <label className="block mb-1 font-medium">
+            Job Description (File or Text)
+          </label>
           <input
             type="file"
             accept=".pdf,.docx,.txt"
@@ -76,10 +96,11 @@ export default function Home() {
           ></textarea>
         </div>
 
+        {/* Submit Button */}
         <button
           type="submit"
           disabled={loading}
-          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 w-full"
+          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 w-full transition"
         >
           {loading ? "Matching..." : "Match Skills"}
         </button>

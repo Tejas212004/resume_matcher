@@ -26,7 +26,7 @@ export default function ResultPage() {
     { name: "Unmatched Skills", value: result.jd_skills.length - result.matched_skills.length },
   ];
 
-  const COLORS = ["#4F46E5", "#CBD5E1"]; // Purple + light gray
+  const COLORS = ["#4F46E5", "#CBD5E1"];
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-100 flex flex-col items-center p-6">
@@ -114,12 +114,21 @@ export default function ResultPage() {
           </div>
         </div>
 
-        <div className="mt-8 flex justify-center">
+        {/* ✅ Buttons Section */}
+        <div className="mt-8 flex flex-col md:flex-row justify-center gap-4">
           <button
             onClick={() => navigate("/")}
             className="bg-blue-600 text-white py-2 px-6 rounded-lg hover:bg-blue-700 transition"
           >
             Try Again
+          </button>
+
+          {/* ✅ New Start Mock Interview Button */}
+          <button
+            onClick={() => navigate("/mock-interview", { state: { result } })}
+            className="bg-green-600 text-white py-2 px-6 rounded-lg hover:bg-green-700 transition"
+          >
+            Start Mock Interview
           </button>
         </div>
       </div>
