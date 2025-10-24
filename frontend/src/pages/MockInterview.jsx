@@ -10,10 +10,10 @@ export default function MockInterview() {
   const [feedback, setFeedback] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [timeLeft, setTimeLeft] = useState(null); // seconds
+  const [timeLeft, setTimeLeft] = useState(null);
   const [isTimeUp, setIsTimeUp] = useState(false);
 
-  // ⏱ Countdown timer effect
+  // 🕒 Countdown Timer
   useEffect(() => {
     if (timeLeft === null || timeLeft <= 0) return;
     const timer = setInterval(() => {
@@ -21,7 +21,7 @@ export default function MockInterview() {
         if (prev <= 1) {
           clearInterval(timer);
           setIsTimeUp(true);
-          handleEvaluate(); // auto submit
+          handleEvaluate(); // auto-submit
           return 0;
         }
         return prev - 1;
@@ -36,7 +36,7 @@ export default function MockInterview() {
     return `${mins}:${secs < 10 ? "0" : ""}${secs}`;
   };
 
-  // 🎯 Generate Interview Questions
+  // 🎯 Generate Questions
   const handleGenerate = async () => {
     let finalResume = resumeData.resume || resume;
     let finalJd = resumeData.jd || jd;
@@ -67,7 +67,7 @@ export default function MockInterview() {
 
       if (data.questions?.length) {
         setQuestions(data.questions);
-        setTimeLeft(5 * 60); // ⏱ 5 minutes timer
+        setTimeLeft(5 * 60);
         setIsTimeUp(false);
       } else {
         setError("No questions were generated. Try uploading a different resume or JD.");
@@ -83,7 +83,9 @@ export default function MockInterview() {
   // 🧠 Evaluate Answers
   const handleEvaluate = async () => {
     if (questions.length === 0) return;
-    if (Object.keys(answers).length === 0) {
+
+    const answeredCount = Object.values(answers).filter((a) => a.trim() !== "").length;
+    if (answeredCount === 0) {
       setError("Please answer at least one question before submitting.");
       return;
     }
@@ -92,18 +94,39 @@ export default function MockInterview() {
     setLoading(true);
 
     try {
+      const userAnswers = questions.map((q) => answers[q]?.trim() || "");
+
       const res = await fetch("http://127.0.0.1:8000/interview/evaluate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          questions: questions,
-          answers: questions.map((q) => answers[q] || ""),
+          questions,
+          answers: userAnswers,
         }),
       });
 
       if (!res.ok) throw new Error("Failed to evaluate answers.");
       const data = await res.json();
-      setFeedback(data);
+
+      // Assign 0 for unanswered questions
+      const perQuestionScores = questions.map((q, i) => {
+        const answer = userAnswers[i];
+        const apiScore = data.individual_scores?.[i] ?? 0;
+        if (!answer) return 0;
+        const score10 = Math.round((apiScore / 10) * 10) / 10;
+        return Math.max(0, Math.min(10, score10));
+      });
+
+      // Calculate total score (out of 100)
+      const totalScore = Math.round(
+        (perQuestionScores.reduce((a, b) => a + b, 0) / (questions.length * 10)) * 100
+      );
+
+      setFeedback({
+        ...data,
+        perQuestionScores,
+        totalScore,
+      });
     } catch (err) {
       console.error(err);
       setError(err.message);
@@ -112,11 +135,16 @@ export default function MockInterview() {
     }
   };
 
+  // 🎨 Color-code scores
+  const getScoreColor = (score) => {
+    if (score >= 8) return "text-green-700 font-semibold";
+    if (score >= 5) return "text-yellow-600 font-medium";
+    return "text-red-600 font-medium";
+  };
+
   return (
     <div className="p-6 max-w-3xl mx-auto">
-      <h1 className="text-2xl font-bold mb-4 text-center text-blue-700">
-        Mock Interview
-      </h1>
+      <h1 className="text-2xl font-bold mb-4 text-center text-blue-700">Mock Interview</h1>
 
       {/* Upload Section */}
       {!resumeData.resume && (
@@ -147,17 +175,10 @@ export default function MockInterview() {
         {loading ? "Generating..." : "Generate Questions"}
       </button>
 
-      {/* Error Message */}
-      {error && (
-        <div className="bg-red-100 border border-red-400 text-red-700 p-3 rounded mt-4">
-          {error}
-        </div>
-      )}
-
       {/* Questions Section */}
       {questions.length > 0 && (
         <div className="mt-6">
-          {/* Countdown Clock */}
+          {/* Countdown */}
           <div className="flex justify-between items-center mb-3">
             <h2 className="text-xl font-semibold text-gray-800">Interview Questions</h2>
             <div
@@ -176,7 +197,7 @@ export default function MockInterview() {
           )}
 
           {questions.map((q, idx) => (
-            <div key={idx} className="mb-5">
+            <div key={idx} className="mb-5 border-b pb-3">
               <p className="font-medium">{idx + 1}. {q}</p>
               <textarea
                 className="w-full border p-2 mt-2 rounded"
@@ -184,15 +205,26 @@ export default function MockInterview() {
                 placeholder="Your answer..."
                 onChange={(e) => setAnswers({ ...answers, [q]: e.target.value })}
               />
+              {feedback && feedback.perQuestionScores && (
+                <p className={`mt-2 ${getScoreColor(feedback.perQuestionScores[idx])}`}>
+                  Score: {feedback.perQuestionScores[idx]}/10
+                </p>
+              )}
             </div>
           ))}
 
-          {/* Manual Submit (if user finishes early) */}
+          {/* Error BELOW questions */}
+          {error && (
+            <div className="bg-red-100 border border-red-400 text-red-700 p-3 rounded mb-4 text-center">
+              {error}
+            </div>
+          )}
+
           {!isTimeUp && (
             <button
               onClick={handleEvaluate}
               disabled={loading}
-              className="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 disabled:bg-gray-400 transition"
+              className="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 disabled:bg-gray-400 transition w-full"
             >
               {loading ? "Evaluating..." : "Submit Answers"}
             </button>
@@ -204,9 +236,12 @@ export default function MockInterview() {
       {feedback && (
         <div className="mt-8 p-4 border rounded-lg shadow-sm bg-green-50">
           <h3 className="text-lg font-semibold mb-2 text-green-700">Interview Feedback</h3>
-          <p className="font-medium">Average Score: {feedback.average_score}%</p>
+          <p className="font-medium mb-2">
+            <span className="text-gray-800">Total Score:</span>{" "}
+            <span className="text-blue-700 font-semibold">{feedback.totalScore}/100</span>
+          </p>
           <ul className="mt-2 list-disc list-inside text-gray-700">
-            {feedback.feedback.map((f, i) => (
+            {feedback.feedback?.map((f, i) => (
               <li key={i}>{f}</li>
             ))}
           </ul>

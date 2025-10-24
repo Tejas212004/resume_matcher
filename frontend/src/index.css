@@ -1,3 +1,14 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Global body styles */
+body {
+  @apply bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-100 
+         text-gray-800 font-sans min-h-screen;
+}
+
+/* Smooth transitions for buttons and links */
+button, a {
+  @apply transition-all duration-300 ease-in-out;
+}
