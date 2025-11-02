@@ -19,3 +19,6 @@ build/
 .idea/
 .DS_Store
 EOF
+
+# Ignore the machine learning model files and CSVs
+backend/app/models/
