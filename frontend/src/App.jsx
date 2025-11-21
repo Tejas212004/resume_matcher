@@ -6,8 +6,9 @@ import Home from "./pages/Home";
 import ResultPage from "./pages/ResultPage";
 import MockInterview from "./pages/MockInterview";
 import { ResumeProvider } from "./context/ResumeContext";
+import { ThemeProvider } from "./context/ThemeContext";
 
-// ✅ Animation wrapper for route transitions
+// Animation wrapper for route transitions
 const AnimatedRoutes = () => {
   const location = useLocation();
 
@@ -60,16 +61,18 @@ const AnimatedRoutes = () => {
 
 function App() {
   return (
-    <ResumeProvider>
-      <Router>
-        <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 text-gray-900">
-          <Navbar />
-          <main className="max-w-7xl mx-auto px-4 py-6">
-            <AnimatedRoutes />
-          </main>
-        </div>
-      </Router>
-    </ResumeProvider>
+    <ThemeProvider>
+      <ResumeProvider>
+        <Router>
+          <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 dark:from-gray-900 dark:via-gray-800 dark:to-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-300">
+            <Navbar />
+            <main className="max-w-7xl mx-auto px-4 py-6">
+              <AnimatedRoutes />
+            </main>
+          </div>
+        </Router>
+      </ResumeProvider>
+    </ThemeProvider>
   );
 }
 

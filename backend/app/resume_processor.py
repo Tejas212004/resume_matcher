@@ -3,467 +3,403 @@
 import joblib
 import re
 import pandas as pd
-from collections import Counter
 import logging
-import random # 🛑 NEW: Added for slightly more diverse placeholder Q/A
+import random
+import os
+from sentence_transformers import SentenceTransformer, util 
 
 # Set the path where your models and data files are located
-# NOTE: Ensure these paths are correct relative to where FastAPI starts the app.
 MODELS_PATH = "app/models/"
 DATA_PATH = "app/models/"
 
 logger = logging.getLogger("resume_processor")
-logger.setLevel(logging.INFO) # Ensure logger is enabled and set to INFO
+logger.setLevel(logging.INFO)
 
-# Global variables for models and data
+# --- 1. THE MASSIVE SKILL DATABASE ---
+ALL_SKILLS = [
+    'Python', 'Data Analysis', 'Machine Learning', 'Communication', 'Project Management', 'Deep Learning', 'SQL',
+    'Tableau', 'Java', 'C++', 'JavaScript', 'HTML', 'CSS', 'React', 'Angular', 'Node.js', 'MongoDB', 'Express.js', 
+    'Git', 'Research', 'Statistics', 'Quantitative Analysis', 'Qualitative Analysis', 'SPSS', 'R', 
+    'Data Visualization', 'Matplotlib', 'Seaborn', 'Plotly', 'Pandas', 'Numpy', 'Scikit-learn', 'TensorFlow', 
+    'Keras', 'PyTorch', 'NLTK', 'Text Mining', 'Natural Language Processing', 'Computer Vision', 'Image Processing', 
+    'OCR', 'Speech Recognition', 'Recommendation Systems', 'Reinforcement Learning', 'Neural Networks', 
+    'XGBoost', 'Random Forest', 'Decision Trees', 'Support Vector Machines', 'Linear Regression', 'Logistic Regression', 
+    'K-Means Clustering', 'Apache Spark', 'Docker', 'Kubernetes', 'Linux', 'Shell Scripting', 'Cybersecurity', 
+    'CI/CD', 'DevOps', 'Agile Methodology', 'Scrum', 'Software Development', 'Web Development', 'Mobile Development', 
+    'Backend Development', 'Frontend Development', 'Full-Stack Development', 'UI/UX Design', 'Figma', 'Adobe XD',
+    'Product Management', 'Sales', 'Marketing', 'SEO', 'Google Analytics', 'AWS', 'Azure', 'GCP', 'FastAPI', 'Flask',
+    'Django', 'Spring Boot', 'Hibernate', 'Microservices', 'REST API', 'GraphQL', 'Redux', 'TypeScript', 'Next.js'
+]
+
+# Global variables
 category_model = None
 job_model = None
 category_vectorizer = None
 job_vectorizer = None
+semantic_model = None 
 job_descriptions_df = None
 skills_data = None
-skill_keywords = [
-    "Python", "Java", "JavaScript", "SQL", "React", "Node.js", "Django", "Flask", 
-    "AWS", "Azure", "Machine Learning", "Data Analysis", "NLP", "Communication", 
-    "Leadership", "Teamwork", "Problem Solving", "TensorFlow", "PyTorch", "Pandas",
-    "Scikit-learn", "Docker", "Kubernetes", "C++", "HTML", "CSS", "Git",
-]
 
-# --- Helper Functions for Text Cleaning and Extraction ---
+# --- 2. MOCK CLASSES ---
+class MockVectorizer:
+    def transform(self, data): return data[0] 
 
+class MockClassifier:
+    def __init__(self, mode): self.mode = mode 
+    def predict(self, text):
+        text_lower = str(text).lower()
+        if self.mode == 'category':
+            if "java" in text_lower or "react" in text_lower: return ["Software Engineering"]
+            if "sql" in text_lower or "data" in text_lower: return ["Data Science"]
+            return ["Data Science"] 
+        else:
+            if "react" in text_lower: return ["Frontend Developer"]
+            if "python" in text_lower: return ["Data Scientist"]
+            return ["Software Engineer"] 
+
+# --- 3. HELPER FUNCTIONS ---
 def clean_text(text):
-    """Standard text cleaning."""
-    if not text:
-        return ""
-    text = str(text).lower() # Ensure text is a string
-    text = re.sub(r'[^a-z0-9\s]', '', text) # Remove special characters
-    text = re.sub(r'\s+', ' ', text).strip() # Remove extra whitespace
+    if not text: return ""
+    text = str(text).lower()
+    text = re.sub(r'http\S+\s', ' ', text)
+    text = re.sub(r'[^a-z0-9\s]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
     return text
 
 def extract_contact_info(text):
-    """Extracts name, email, and phone number using regex."""
-    # Simple Name Extraction (usually the first line/block, case-insensitive)
-    # Improved Name Regex: Looks for 2-4 Title-cased words at the start of a line
-    name_match = re.search(r"^\s*([A-Z][a-z]+(?: [A-Z][a-z]+){1,3})", text.strip(), re.MULTILINE)
-    name = name_match.group(1) if name_match else "Candidate Name N/A"
+    # 1. Improved Name Extraction: Handles Title Case (John Doe) AND All Caps (JOHN DOE)
+    # It looks for the first line that has 2-4 words, is not a common label, and has letters.
+    lines = text.split('\n')
+    name = "Candidate Name"
+    
+    for line in lines[:10]: # Check first 10 lines only
+        clean_line = line.strip()
+        # Skip empty lines or lines with common labels
+        if not clean_line or any(x in clean_line.lower() for x in ['resume', 'curriculum', 'vitae', 'cv', 'bio', 'phone', 'email', 'contact']):
+            continue
+        
+        # Check if line is 2-4 words long and mostly letters
+        words = clean_line.split()
+        if 2 <= len(words) <= 4 and all(len(w) > 1 for w in words) and not any(char.isdigit() for char in clean_line):
+            name = clean_line
+            break
 
-    # Email Extraction
+    # 2. Email Extraction
     email_match = re.search(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", text)
     email = email_match.group(0) if email_match else "N/A"
-
-    # Phone Number Extraction (various common formats, looking for 7+ digits)
+    
+    # 3. Phone Extraction
     phone_match = re.search(r"(\(?\d{3}\)?)?\s*[-.\s]?\d{3}\s*[-.\s]?\d{4}(?!\d)", text)
     phone = phone_match.group(0).strip() if phone_match else "N/A"
-
+    
     return name, email, phone
 
+# 🛑 FIX: Robust Line-by-Line Education Extraction
 def extract_education(text):
-    """Simple regex-based education extraction."""
-    education_keywords = r"(?:b\.?s\.?|m\.?s\.?|ph\.?d\.?|master'?s|bachelor'?s|university|college|institute|degree|diploma)"
-    # Pattern looks for the keyword, then captures content until a newline or end of section
-    education_pattern = re.compile(f"({education_keywords}.*?)(?:\n\n|\n\s*[A-Z]|$)", re.IGNORECASE | re.DOTALL) 
+    """
+    Extracts education details by scanning every line for degree/institute keywords.
+    This is more robust than regex blocks for messy PDF text.
+    """
+    extracted = []
     
-    matches = education_pattern.findall(text)
+    # 1. Keywords that strongly indicate an education line
+    degree_keywords = [
+        r"\bb\.?tech\b", r"\bm\.?tech\b", r"\bb\.?e\b", r"\bb\.?s\b", r"\bm\.?s\b", 
+        r"\bbachelor", r"\bmaster", r"\bdiploma\b", r"\bph\.?d\b", r"\bdegree\b",
+        r"\bhigher\s?secondary\b", r"\bsenior\s?secondary\b", r"\bxii\b", r"\bx\b"
+    ]
+    institute_keywords = [
+        r"\buniversity\b", r"\binstitute\b", r"\bcollege\b", r"\bschool\b", r"\bacademy\b"
+    ]
     
-    # Clean up and return unique entries
-    cleaned_matches = {re.sub(r'\s+', ' ', m[0].strip()) for m in matches if len(m[0].strip()) > 10}
-    return list(cleaned_matches)[:3] 
-
+    # Split text into lines to handle formatting
+    lines = text.split('\n')
+    
+    for line in lines:
+        clean_line = line.strip()
+        if len(clean_line) < 5: continue # Skip very short lines
+        
+        # Check for degree match
+        has_degree = any(re.search(pat, clean_line, re.IGNORECASE) for pat in degree_keywords)
+        
+        # Check for institute match
+        has_institute = any(re.search(pat, clean_line, re.IGNORECASE) for pat in institute_keywords)
+        
+        # Heuristic: Keep the line if it mentions a Degree OR an Institute
+        if has_degree or has_institute:
+            extracted.append(clean_line)
+            
+    # Return unique top results
+    return list(set(extracted))[:5]
 
 def extract_skills_from_text(text):
-    """Extract skills from text based on the global keyword list."""
     text_lower = clean_text(text)
-    # Use word boundaries (\b) to ensure full word match
-    found = {skill for skill in skill_keywords if re.search(rf"\b{re.escape(skill.lower())}\b", text_lower)}
-    return list(found)
+    found = []
+    for skill in ALL_SKILLS:
+        pattern = r"\b{}\b".format(re.escape(skill.lower()))
+        if re.search(pattern, text_lower):
+            found.append(skill)
+    return list(set(found))
 
-
-# --- ML Model Loading ---
-
+# --- 4. MODEL LOADING ---
 def load_models():
-    """Load all necessary ML models and data. Returns True if core models load."""
-    global category_model, job_model, category_vectorizer, job_vectorizer, job_descriptions_df, skills_data
-    
-    model_loaded = True
+    global category_model, job_model, category_vectorizer, job_vectorizer, semantic_model
     try:
-        # Load CORE Models
         category_model = joblib.load(MODELS_PATH + "rf_classifier_categorization.pkl")
         category_vectorizer = joblib.load(MODELS_PATH + "tfidf_vectorizer_categorization.pkl")
         job_model = joblib.load(MODELS_PATH + "rf_classifier_job_recommendation.pkl")
         job_vectorizer = joblib.load(MODELS_PATH + "tfidf_vectorizer_job_recommendation.pkl")
-
-        # Load SUPPLEMENTARY Data (Non-critical, uses try/except)
-        try:
-            # Added check for encoding
-            job_descriptions_df = pd.read_csv(DATA_PATH + "job_descriptions.csv", encoding='latin1', on_bad_lines='skip') 
-            skills_data = pd.read_csv(DATA_PATH + "job_title_des.csv", encoding='latin1', on_bad_lines='skip')
-        except FileNotFoundError as fnf:
-            logger.warning(f"Supplementary data file not found (non-critical): {fnf}")
-        except Exception as e:
-            logger.warning(f"Error loading supplementary data: {e}")
-            
-        logger.info("ML Models and vectorizers loaded successfully.")
-    except FileNotFoundError as fnf:
-        logger.error(f"CRITICAL: Required ML model file not found. Analysis will fail: {fnf}")
-        model_loaded = False
+        logger.info("✅ ML Models loaded successfully.")
     except Exception as e:
-        logger.error(f"CRITICAL: Error loading ML models: {e}")
-        model_loaded = False
-        
-    return model_loaded
-
-
-# --- Core Prediction Functions ---
-
-def predict_category(text):
-    """Predicts the broad category of the resume."""
-    if not category_model or not category_vectorizer:
-        return "Model Not Loaded"
+        logger.warning(f"⚠️ ML Models missing ({e}). Using MOCK logic.")
+        category_vectorizer = MockVectorizer()
+        job_vectorizer = MockVectorizer()
+        category_model = MockClassifier('category')
+        job_model = MockClassifier('job')
     
-    text_cleaned = clean_text(text)
-    if not text_cleaned:
-        return "Empty Text Input"
-
     try:
-        features = category_vectorizer.transform([text_cleaned])
-        prediction = category_model.predict(features)
-        return prediction[0]
+        logger.info("🔹 Loading SentenceTransformer for Realistic Scoring...")
+        semantic_model = SentenceTransformer('all-MiniLM-L6-v2')
+        logger.info("✅ AI Scoring Model loaded.")
     except Exception as e:
-        logger.error(f"Prediction failed for category: {e}")
-        return "Prediction Error"
+        logger.error(f"CRITICAL: Could not load AI Scoring Model: {e}")
+        semantic_model = None
 
+    return True
+
+# --- 5. PREDICTION & LOGIC ---
+def predict_category(text):
+    if not category_model: return "Unknown"
+    cleaned = clean_text(text)
+    features = category_vectorizer.transform([cleaned])
+    prediction = category_model.predict(features)
+    return prediction[0]
 
 def generate_recommendation(text):
-    """Generates a job recommendation based on the resume."""
-    if not job_model or not job_vectorizer:
-        return "Model Not Loaded"
-    
-    text_cleaned = clean_text(text)
-    if not text_cleaned:
-        return "Empty Text Input"
-
-    try:
-        features = job_vectorizer.transform([text_cleaned])
-        prediction = job_model.predict(features)
-        return prediction[0]
-    except Exception as e:
-        logger.error(f"Prediction failed for recommendation: {e}")
-        return "Prediction Error"
-
-
-# --- Logic for ATS Score and Tips ---
+    if not job_model: return "Unknown"
+    cleaned = clean_text(text)
+    features = job_vectorizer.transform([cleaned])
+    prediction = job_model.predict(features)
+    return prediction[0]
 
 def calculate_ats_score(text, recommended_job, extracted_skills):
-    """
-    Calculates a simulated ATS score based on length, formatting, and relevance.
-    """
     score = 0
-    
-    # 1. Length/Format (Max 30 pts)
     word_count = len(text.split())
-    if 300 <= word_count <= 800:
-        score += 30 # Optimal length
-    elif 200 <= word_count <= 1000:
-        score += 20
-    else:
-        score += 10
-    
-    # 2. Keywords/Relevance (Max 40 pts)
-    # Basic relevance check: how many top 5 general skills are present
-    top_general_skills = ["Python", "SQL", "Communication", "Leadership", "Data Analysis"]
-    relevant_skill_count = sum(1 for skill in top_general_skills if skill in extracted_skills)
-    score += int((relevant_skill_count / len(top_general_skills)) * 40)
-    
-    # 3. Contact Info (Max 30 pts)
+    if 300 <= word_count <= 1000: score += 25
+    else: score += 10
+    if len(extracted_skills) >= 5: score += 25
+    if len(extracted_skills) >= 10: score += 15
     name, email, phone = extract_contact_info(text)
-    info_score = 0
-    if name != "Candidate Name N/A": info_score += 10
-    if email != "N/A": info_score += 10
-    if phone != "N/A": info_score += 10
-    score += info_score
-
-    # Cap the score at 100
-    return min(100, int(score))
+    if email != "N/A": score += 15
+    if phone != "N/A": score += 10
+    if any(x in text.lower() for x in ['experience', 'education', 'projects']): score += 10
+    return min(100, score)
 
 def generate_personalized_tips(text, recommended_job, extracted_skills):
-    """Generates tips based on common ATS best practices."""
     tips = []
-    if len(text.split()) < 300:
-        tips.append("Your resume is quite short. Consider adding more details to your experience and project sections.")
-    
-    # Check for quantification (e.g. numbers used in descriptive sections)
-    quantified_check = re.search(r'\d+%', text) or re.search(r'over \d+ million', text.lower())
-    if not quantified_check:
-        tips.append("Focus on **results and achievements** over just responsibilities, using strong action verbs and **quantifying** your successes (e.g., 'Increased revenue by 15%').")
+    if len(extracted_skills) < 5: tips.append("Low keyword density. Add more technical skills.")
+    if not re.search(r'\d+%', text): tips.append("Quantify your achievements with numbers (e.g., 'Improved by 20%').")
+    if recommended_job != "Unknown": tips.append(f"Highlight projects relevant to {recommended_job}.")
+    if not tips: tips.append("Resume looks good! Focus on tailoring it to specific JDs.")
+    return tips
 
-    if any(s.lower() not in text.lower() for s in ["project", "portfolio"]):
-        tips.append(f"To match the competitiveness of a '{recommended_job}' role, add a dedicated section for relevant personal projects or portfolio links.")
-    if not extract_education(text):
-        tips.append("Ensure your **Education** section is clearly formatted with degree, institution, and graduation dates.")
-        
-    # Check for job-specific skills if applicable
-    if skills_data is not None and recommended_job in skills_data['Category'].values:
-        # Simple check for one mandatory skill
-        if "Python" in skills_data[skills_data['Category'] == recommended_job]['Description'].iloc[0] and "Python" not in extracted_skills:
-             tips.append(f"The role '{recommended_job}' heavily uses **Python**. Make sure your proficiency is highlighted.")
-             
-    return tips or ["Your resume looks well-structured! Focus on tailoring it to specific job descriptions."]
-
-
-# --- Skill Gap and Future Skill Analysis ---
-
+# --- 6. GAP ANALYSIS ---
 def analyze_skill_gap_and_future(recommended_job, extracted_skills):
-    """Identifies missing skills and suggests future skills based on the job title."""
-    missing_skills = []
-    future_skills = []
-    
-    # 1. Find common skills for the recommended job (Simulated)
-    # Check if skills_data is a DataFrame before use
-    if isinstance(skills_data, pd.DataFrame) and recommended_job in skills_data['Category'].values:
-        job_row = skills_data[skills_data['Category'] == recommended_job].iloc[0]
-        
-        # Use the 'Description' column as a source for required skills (must be lower case for clean matching)
-        required_skills_text = clean_text(job_row['Description']) 
-        required_skills_for_job = extract_skills_from_text(required_skills_text)
-        
-        # Filter out common soft skills before presenting missing skills
-        soft_skills = ["teamwork", "communication", "leadership", "problem solving"]
-        missing_skills = [
-            skill for skill in required_skills_for_job 
-            if skill not in extracted_skills and skill.lower() not in soft_skills
-        ][:4] # Limit to top 4 missing
-
-    # 2. Future Skills (Based on category trends)
-    if "Data" in recommended_job or "Analyst" in recommended_job or "ML" in recommended_job:
-        future_skills = ["Advanced R", "Cloud Data Warehousing (Snowflake)", "MLOps"]
-    elif "Developer" in recommended_job or "Engineer" in recommended_job or "DevOps" in recommended_job:
-        future_skills = ["Go Language", "Microservices Architecture", "Advanced Kubernetes"]
-    else:
-        future_skills = ["Professional Networking", "Advanced Presentation Skills"]
-
-    return missing_skills, future_skills[:3]
-
-
-# --- Radar Chart Data Generation (Simulated) ---
+    required_skills_map = {
+        "Data Scientist": ["Python", "SQL", "Machine Learning", "Pandas", "Tableau"],
+        "Backend Developer": ["Java", "Spring", "SQL", "Microservices", "Docker"],
+        "Frontend Developer": ["React", "JavaScript", "CSS", "HTML", "Redux"],
+        "DevOps Engineer": ["AWS", "Docker", "Kubernetes", "Linux", "CI/CD"],
+        "Software Engineering": ["Git", "System Design", "Algorithms", "Testing"]
+    }
+    future_trends_map = {
+        "Data Scientist": ["MLOps", "Explainable AI", "Big Data (Spark)"],
+        "Backend Developer": ["Serverless Architecture", "GraphQL", "Go Language"],
+        "Frontend Developer": ["WebAssembly", "Next.js", "Accessibility"],
+        "DevOps Engineer": ["GitOps", "Service Mesh", "DevSecOps"]
+    }
+    target_skills = required_skills_map.get(recommended_job, ["Communication", "Problem Solving"])
+    missing = [s for s in target_skills if s not in extracted_skills]
+    future = future_trends_map.get(recommended_job, ["Cloud Computing", "AI Tools"])
+    return missing[:5], future
 
 def generate_radar_data(extracted_skills, recommended_job):
-    """Creates a simulated data structure for a radar chart based on key areas."""
-    
-    # Define key assessment areas
-    areas = {
-        "Technical Depth": ["Python", "Java", "SQL", "Docker"],
-        "ML/Data Science": ["Machine Learning", "NLP", "PyTorch", "Pandas"],
-        "Cloud/DevOps": ["AWS", "Azure", "Kubernetes", "Git"],
-        "Soft Skills": ["Communication", "Leadership", "Teamwork"],
-    }
-    
-    radar_chart_data = []
-    
-    for area, skills_list in areas.items():
-        score_sum = 0
-        for skill in skills_list:
-            if skill in extracted_skills:
-                # Give a base score of 80 for presence
-                score_sum += 80 
-            else:
-                # Give a lower score for absence
-                score_sum += 40 
+    areas = ["Coding", "Communication", "Problem Solving", "Tools", "Teamwork"]
+    data = []
+    for area in areas:
+        base = 50
+        if area == "Coding" and len(extracted_skills) > 5: base += 30
+        if area == "Tools" and len(extracted_skills) > 8: base += 30
+        score = min(100, base + random.randint(0, 20))
+        data.append({"skill": area, "score": score})
+    return data
 
-        # Average the score and adjust slightly based on job relevance
-        avg_score = score_sum / len(skills_list)
-        
-        # Final Score (out of 100)
-        final_score = min(100, int(avg_score))
-        
-        radar_chart_data.append({"skill": area, "score": final_score})
-
-    return radar_chart_data
-
-
-# --- INTERNAL HELPER FOR ERROR STRUCTURE ---
-
-def _get_empty_analysis_result(error_message, resume_content_text=""):
-    """Returns a structure with default/null values to match frontend expectation on failure."""
+# --- 7. INTERNAL ERROR HANDLER ---
+def _get_empty_analysis_result(error_message, resume_text=""):
     return {
-        "ats_score": 0,
-        "predicted_category": "Error",
-        "recommended_job": "Error",
-        "name": "N/A",
-        "email": "N/A",
-        "phone": "N/A",
-        "extracted_skills": [],
-        "extracted_education": [],
-        "personalized_tips": [f"Analysis failed: {error_message}. Please check server logs and ensure ML models are present."],
-        "missing_skills": [],
-        "future_skills": [],
-        "interview_questions": ["Analysis failed. Please try a different resume file or check the backend server."],
-        "radar_data": [{"skill": "Technical Depth", "score": 0}, {"skill": "ML/Data Science", "score": 0}, {"skill": "Cloud/DevOps", "score": 0}, {"skill": "Soft Skills", "score": 0}],
-        # 🛑 CRITICAL: Ensure this field is present, even if empty/error
-        "resume_content_text": resume_content_text 
+        "ats_score": 0, "predicted_category": "Error", "recommended_job": "Error",
+        "name": "N/A", "email": "N/A", "phone": "N/A", "extracted_skills": [],
+        "extracted_education": [], "personalized_tips": [error_message],
+        "missing_skills": [], "future_skills": [], "interview_questions": [],
+        "radar_data": [], "resume_content_text": resume_text
     }
 
-
-# --- MAIN ATS ANALYSIS FUNCTION (Orchestrates Analysis with Error Guards) ---
-
-def perform_ats_analysis(resume_text):
-    """Orchestrates all analysis steps and returns a structured result."""
-    
-    if not resume_text or len(resume_text.strip()) < 50:
-        logger.error("Resume text is empty or too short for analysis.")
-        return _get_empty_analysis_result("Resume text is empty or corrupt.", resume_text) # Pass text back
-
+# --- 8. MAIN ORCHESTRATOR ---
+def perform_ats_analysis(resume_text, jd_text=""):
+    if not resume_text or len(resume_text) < 50:
+        return _get_empty_analysis_result("Resume text too short.", resume_text)
     try:
-        # 1. Core Extraction
         name, email, phone = extract_contact_info(resume_text)
         extracted_skills = extract_skills_from_text(resume_text)
         extracted_education = extract_education(resume_text)
-        
-        # 2. ML Prediction
         predicted_category = predict_category(resume_text)
         recommended_job = generate_recommendation(resume_text)
-
-        # CRITICAL CHECK: If ML prediction fails, return an error state
-        if "Model Not Loaded" in predicted_category or "Prediction Error" in predicted_category:
-            logger.error(f"ML Models failed to predict. Category: {predicted_category}, Job: {recommended_job}")
-            return _get_empty_analysis_result(f"ML Model Failure: {predicted_category}", resume_text)
-        
-        
-        # 3. Scoring and Gaps
         ats_score = calculate_ats_score(resume_text, recommended_job, extracted_skills)
-        personalized_tips = generate_personalized_tips(resume_text, recommended_job, extracted_skills)
-        missing_skills, future_skills = analyze_skill_gap_and_future(recommended_job, extracted_skills)
-        
-        # 4. Interview Prep 
-        job_placeholder = recommended_job if recommended_job not in ["Model Not Loaded", "Prediction Error"] else "your target field"
-        
-        # Dynamic question selection
-        tech_skill = random.choice([s for s in extracted_skills if s not in ["Communication", "Leadership"]]) if len(extracted_skills) > 3 else 'technical skills'
-        
-        interview_questions = [
-            f"Tell me about a challenging project related to {job_placeholder} that you worked on.",
-            f"How do you ensure code quality or data accuracy in a {predicted_category} environment?",
-            f"What is your experience with {tech_skill} and how have you applied it recently?",
-            "Why are you interested in this specific career path and our industry?",
-            "Describe a time you had to deal with conflict or disagreement on a team." # Added a standard behavioral question
-        ]
-        
-        # 5. Visualization Data
+        tips = generate_personalized_tips(resume_text, recommended_job, extracted_skills)
+        missing, future = analyze_skill_gap_and_future(recommended_job, extracted_skills)
         radar_data = generate_radar_data(extracted_skills, recommended_job)
+        
+        # RANDOMIZED QUESTION GENERATION LOGIC
+        interview_questions = []
+        
+        # 1. Determine Skill Source
+        target_skills = []
+        if jd_text and len(jd_text) > 10:
+            jd_skills = extract_skills_from_text(jd_text)
+            if jd_skills:
+                target_skills = list(set(jd_skills)) 
+        
+        if not target_skills:
+            target_skills = list(set(extracted_skills))
 
-        # 6. Final Return Structure
+        # 2. Shuffle for Randomness
+        if target_skills:
+            random.shuffle(target_skills) 
+        
+        # 3. Generate Mix of Questions
+        if target_skills:
+            interview_questions.append(f"Can you walk me through a complex project where you utilized {target_skills[0]}?")
+        else:
+            interview_questions.append("Tell me about the most challenging technical project you have worked on.")
+
+        if len(target_skills) > 1:
+            interview_questions.append(f"How would you rate your proficiency in {target_skills[1]}, and can you give an example of its application?")
+        else:
+            interview_questions.append(f"What attracts you to the {recommended_job} role specifically?")
+
+        behavioral_bank = [
+            "Describe a time you had to debug a critical issue under pressure.",
+            "Tell me about a time you disagreed with a team member's technical approach.",
+            "Describe a situation where you had to learn a new tool in a short period of time.",
+            "Have you ever failed to meet a deadline? How did you handle it?"
+        ]
+        interview_questions.append(random.choice(behavioral_bank))
+
+        interview_questions.append(f"How do you approach ensuring scalability and maintainability in {predicted_category} projects?")
+
+        soft_bank = [
+            "Where do you see your technical skills growing in the next 2 years?",
+            "How do you handle feedback on your code or designs?",
+            f"Why do you believe you are a good fit for this {recommended_job} position?",
+            "What is your preferred work style: independent contributor or team collaborator?"
+        ]
+        interview_questions.append(random.choice(soft_bank))
+        
         return {
-            "ats_score": ats_score,
-            "predicted_category": predicted_category,
-            "recommended_job": recommended_job,
-            "name": name,
-            "email": email,
-            "phone": phone,
-            "extracted_skills": extracted_skills,
-            "extracted_education": extracted_education,
-            "personalized_tips": personalized_tips,
-            "missing_skills": missing_skills,
-            "future_skills": future_skills,
-            "interview_questions": interview_questions,
-            "radar_data": radar_data,
-            # 🛑 CRITICAL: MUST INCLUDE THE FULL TEXT for the next step (interview evaluation)
-            "resume_content_text": resume_text 
+            "ats_score": ats_score, "predicted_category": predicted_category,
+            "recommended_job": recommended_job, "name": name, "email": email, "phone": phone,
+            "extracted_skills": extracted_skills, "extracted_education": extracted_education,
+            "personalized_tips": tips, "missing_skills": missing, "future_skills": future,
+            "interview_questions": interview_questions, "radar_data": radar_data,
+            "resume_content_text": resume_text
         }
     except Exception as e:
-        logger.error(f"FATAL error during ATS analysis: {e}")
-        return _get_empty_analysis_result(f"FATAL Server Error: {e}", resume_text)
+        logger.error(f"Analysis Error: {e}")
+        return _get_empty_analysis_result(str(e), resume_text)
 
-
-# --- INTERVIEW EVALUATION FUNCTION (FOR BOTH TEXT AND AUDIO) ---
-# 🛑 CORRECTED: Added transcribed_text to the signature for consistency and logic.
-
+# --- 9. AI INTERVIEW EVALUATION ---
 def evaluate_interview_answers(questions, answers, resume_content, transcribed_text=None):
-    """
-    Simulates LLM-based scoring for interview answers (text-based evaluation logic).
-    
-    This function handles both single Q/A pair submissions (for real-time evaluation)
-    and lists of Q/A pairs (for legacy/bulk evaluation).
-    The 'answers' parameter must contain the text to be evaluated.
-    """
     individual_scores = []
     individual_feedback = []
-    overall_feedback = []
     
-    # Normalize input: always work with lists of Q/A pairs
-    # If the call is for a single question (as in the text evaluation endpoint), wrap the single item
     if not isinstance(questions, list): questions = [questions]
     if not isinstance(answers, list): answers = [answers]
-    # transcribed_text is not used in the score calculation but must be returned
     
-    if not questions or not answers or len(questions) != len(answers):
-        return {
-            "individual_scores": [],
-            "individual_feedback": [],
-            "feedback": ["No questions or answers were submitted for evaluation."],
-            "transcribed_text": transcribed_text or answers[0] if answers else ""
-        }
-    
+    global semantic_model
+    if not semantic_model:
+        try:
+            semantic_model = SentenceTransformer('all-MiniLM-L6-v2')
+        except:
+            semantic_model = None
+
     resume_skills = extract_skills_from_text(resume_content)
     
-    for i, (q, a) in enumerate(zip(questions, answers)):
+    for q, a in zip(questions, answers):
         score = 0
-        feedback = "Answer too short or not provided. Please elaborate on your experience."
+        feedback_parts = []
+        ans_text = str(a).strip()
         
-        answer_text = str(a).strip()
-        
-        # 1. Base Score (Max 3 pts - requires at least 15 characters)
-        if len(answer_text) > 15: 
-            score = 3
-            feedback = "Very brief answer. Needs more detail and contextual examples."
-        
-        # 2. Medium Score (Max 7 pts - requires length and skill linkage)
-        # Using a longer length check here for better score differentiation
-        if len(answer_text) > 50 and any(skill.lower() in answer_text.lower() for skill in resume_skills):
-            score = 7 
-            feedback = "Good answer, linking experience back to your resume skills. Needs more structure (e.g., STAR method)."
+        # STRICT CHECK FOR UNANSWERED
+        if not ans_text or len(ans_text.split()) < 3 or "no answer provided" in ans_text.lower():
+            individual_scores.append(0)
+            individual_feedback.append("No answer provided.")
+            continue
+
+        # CORE AI SCORING
+        if semantic_model:
+            q_emb = semantic_model.encode(q, convert_to_tensor=True)
+            a_emb = semantic_model.encode(ans_text, convert_to_tensor=True)
             
-        # 3. High Score (Max 10 pts - requires quantified results/STAR method keywords)
-        if len(answer_text) > 100 and re.search(r'\d+', answer_text) and re.search(r'\b(increased|reduced|managed|result|achieved)\b', answer_text.lower()):
-            score = 9
-            feedback = "Excellent use of quantified results and specific examples (STAR method detected). Very compelling."
+            similarity = float(util.cos_sim(q_emb, a_emb)[0][0])
             
-        # 4. Catch the 'silly answer' scenario (less than 5 words)
-        if len(answer_text.split()) < 5 and len(answer_text) > 0:
-            score = min(score, 2) # Force score down to max 2 if the answer is too short (less than 5 words)
-            if score <= 2:
-                feedback = "Answer is far too short. Please provide a detailed, multi-sentence response."
-
-        # Final safety cap
-        score = min(10, score)
-
-        individual_scores.append(score)
-        individual_feedback.append(feedback)
-
-    # Generate overall feedback ONLY if multiple questions were submitted (legacy path)
-    if len(questions) > 1:
-        if individual_scores:
-            avg_score = sum(individual_scores) / len(individual_scores)
+            if similarity > 0.55: 
+                score = 8  
+                feedback_parts.append("Highly relevant answer.")
+            elif similarity > 0.45: 
+                score = 6  
+                feedback_parts.append("Relevant, but could be more specific.")
+            elif similarity > 0.35: 
+                score = 4  
+                feedback_parts.append("Somewhat vague. Address the specific concept.")
+            elif similarity > 0.25: 
+                score = 2 
+                feedback_parts.append("Off-topic or weak relation.")
+            else: 
+                score = 0  
+                feedback_parts.append("Incorrect or irrelevant answer.")
         else:
-            avg_score = 0
-            overall_feedback.append("Evaluation failed due to missing or invalid answers.")
-            
-        if not overall_feedback:
-            if avg_score >= 7.5:
-                overall_feedback.append("Outstanding performance! Your answers were relevant, detailed, and directly linked to your resume.")
-            elif avg_score >= 5:
-                overall_feedback.append("Solid effort. Your answers covered the basics, but try to use the STAR method (Situation, Task, Action, Result) for behavioral questions.")
-            else:
-                overall_feedback.append("Your responses were too brief or lacked specific evidence. Review your resume and practice elaborating.")
+            score = 5
+            feedback_parts.append("AI unavailable.")
 
-    # Return structure is crucial for the frontend
+        # CONTEXT BONUS
+        q_words = set(re.findall(r'\w+', q.lower()))
+        a_words = set(re.findall(r'\w+', ans_text.lower()))
+        common_words = q_words.intersection(a_words)
+        meaningful_overlap = [w for w in common_words if len(w) > 3]
+        
+        if len(meaningful_overlap) >= 1:
+            score += 1
+            
+        # STAR METHOD BONUS
+        if score >= 4:
+            star_keywords = ['situation', 'task', 'action', 'result', 'solved', 'led', 'achieved']
+            if any(w in ans_text.lower() for w in star_keywords):
+                score += 1
+                feedback_parts.append("Good use of action verbs.")
+
+        final_score = min(10, max(0, score))
+        
+        final_feedback_text = " ".join(feedback_parts)
+        if final_score == 0 and not final_feedback_text:
+            final_feedback_text = "Answer does not appear relevant to the question."
+
+        individual_scores.append(final_score)
+        individual_feedback.append(final_feedback_text)
+        
     return {
         "individual_scores": individual_scores,
         "individual_feedback": individual_feedback,
-        # Only return overall feedback if it was generated (i.e., for bulk submission)
-        "feedback": overall_feedback, 
-        # 🛑 CRITICAL: Return the text evaluated. For audio, this is the transcription. For text submission, it's the answer.
-        "transcribed_text": transcribed_text or answers[0] if answers else "" 
+        "transcribed_text": transcribed_text or answers[0]
     }
 
-# Call load_models at the end of the file to load the models when the module is imported
-if not load_models():
-    logger.error("Resume processor started but critical models are missing. Analysis calls will return structured error data.")
+load_models()

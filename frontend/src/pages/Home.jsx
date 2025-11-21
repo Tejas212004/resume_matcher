@@ -30,7 +30,7 @@ export default function Home() {
     resetAnalysis(); // Reset previous results
 
     try {
-      // --- A. Prepare FormData for both API calls ---
+      // --- A. Prepare FormData for JD Match (Call 2) ---
       const matchFormData = new FormData();
       matchFormData.append("resume", resume);
 
@@ -40,14 +40,20 @@ export default function Home() {
         matchFormData.append("jd", jdFile);
         jdForContext = jdFile.name;
       } else if (jdText) {
-        // The /match endpoint expects 'jd_text' for text input
         matchFormData.append("jd_text", jdText); 
         jdForContext = "Pasted Job Description";
       }
 
-      // --- B. API Call 1: Comprehensive ATS/ML Analysis (/analyze_resume) ---
+      // --- B. Prepare FormData for ATS Analysis (Call 1) ---
+      // 🛑 UPDATED: Now sending JD to this endpoint too! 
       const analyzeFormData = new FormData();
       analyzeFormData.append("resume", resume);
+
+      if (jdFile) {
+        analyzeFormData.append("jd", jdFile);
+      } else if (jdText) {
+        analyzeFormData.append("jd_text", jdText);
+      }
 
       // Perform both API calls concurrently
       const [analyzeRes, matchRes] = await Promise.all([
